@@ -1,0 +1,119 @@
+services:
+  postgres:
+    image: "${KAXI_POSTGRES_IMAGE:?Set KAXI_POSTGRES_IMAGE with repository@sha256 digest}"
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${KAXI_DB_NAME:?}
+      POSTGRES_USER: ${KAXI_DB_USER:?}
+      POSTGRES_PASSWORD: ${KAXI_DB_PASSWORD:?}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infrastructure/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  redis:
+    image: "${KAXI_REDIS_IMAGE:?Set KAXI_REDIS_IMAGE with repository@sha256 digest}"
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio:
+    image: "${KAXI_MINIO_IMAGE:?Set KAXI_MINIO_IMAGE with repository@sha256 digest}"
+    restart: unless-stopped
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: ${KAXI_S3_ACCESS_KEY:?}
+      MINIO_ROOT_PASSWORD: ${KAXI_S3_SECRET_KEY:?}
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  minio-init:
+    image: "${KAXI_MINIO_CLIENT_IMAGE:?Set KAXI_MINIO_CLIENT_IMAGE with repository@sha256 digest}"
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["mc alias set local http://minio:9000 $$KAXI_S3_ACCESS_KEY $$KAXI_S3_SECRET_KEY && mc mb --ignore-existing local/$$KAXI_S3_BUCKET && mc anonymous set none local/$$KAXI_S3_BUCKET"]
+    env_file: ${KAXI_ENV_FILE:-.env.deploy}
+    restart: "no"
+
+  migrate:
+    image: "${KAXI_BACKEND_IMAGE:?Set KAXI_BACKEND_IMAGE with repository@sha256 digest}"
+    env_file: ${KAXI_ENV_FILE:-.env.deploy}
+    command: ["/bin/sh", "-c", "python backend/manage.py migrate --noinput --settings=config.settings.production && python backend/manage.py seed_permissions --settings=config.settings.production && python backend/manage.py bootstrap_initial_admin --settings=config.settings.production"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  backend:
+    image: "${KAXI_BACKEND_IMAGE:?Set KAXI_BACKEND_IMAGE with repository@sha256 digest}"
+    restart: unless-stopped
+    env_file: ${KAXI_ENV_FILE:-.env.deploy}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; request=urllib.request.Request('http://127.0.0.1:8000/api/v1/system/health/', headers={'X-Forwarded-Proto':'https'}); urllib.request.urlopen(request, timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  worker:
+    image: "${KAXI_BACKEND_IMAGE:?Set KAXI_BACKEND_IMAGE with repository@sha256 digest}"
+    restart: unless-stopped
+    env_file: ${KAXI_ENV_FILE:-.env.deploy}
+    command: ["celery", "-A", "config", "worker", "--loglevel=INFO", "--concurrency=2", "-Q", "critical,integration,documents,finance,analytics,maintenance"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+
+  scheduler:
+    image: "${KAXI_BACKEND_IMAGE:?Set KAXI_BACKEND_IMAGE with repository@sha256 digest}"
+    restart: unless-stopped
+    env_file: ${KAXI_ENV_FILE:-.env.deploy}
+    command: ["celery", "-A", "config", "beat", "--loglevel=INFO", "--schedule=/tmp/celerybeat-schedule"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  web:
+    image: "${KAXI_WEB_IMAGE:?Set KAXI_WEB_IMAGE with repository@sha256 digest}"
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${KAXI_HTTP_PORT:-8088}:8080"
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:

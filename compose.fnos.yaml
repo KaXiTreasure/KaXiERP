@@ -1,0 +1,148 @@
+name: kaxi-erp
+
+x-kaxi-environment: &kaxi-environment
+  KAXI_ENV: production
+  KAXI_SECRET_KEY: ${KAXI_SECRET_KEY:-kaxi-fnos-local-only-2026-8e7f4d2c9a6b1f3e5d8c0a7b4f2e6d9c}
+  KAXI_DEBUG: "false"
+  KAXI_ALLOWED_HOSTS: ${KAXI_ALLOWED_HOSTS:-*}
+  KAXI_HTTPS_ENABLED: ${KAXI_HTTPS_ENABLED:-false}
+  KAXI_DB_NAME: kaxi_erp
+  KAXI_DB_USER: kaxi_app
+  KAXI_DB_PASSWORD: ${KAXI_DB_PASSWORD:-kaxi_db_fnos_8e7f4d2c9a6b}
+  KAXI_DB_HOST: postgres
+  KAXI_DB_PORT: "5432"
+  KAXI_REDIS_URL: redis://redis:6379/0
+  KAXI_S3_ENDPOINT: http://minio:9000
+  KAXI_S3_ACCESS_KEY: ${KAXI_S3_ACCESS_KEY:-kaxi_minio}
+  KAXI_S3_SECRET_KEY: ${KAXI_S3_SECRET_KEY:-kaxi_s3_fnos_6b1f3e5d8c0a7b4f}
+  KAXI_S3_BUCKET: kaxi-documents
+
+services:
+  postgres:
+    image: docker.io/library/postgres@sha256:e38411452a464af89e5adadb8d223bf53b898d47d6ef918b2d58c08707350449
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: kaxi_erp
+      POSTGRES_USER: kaxi_app
+      POSTGRES_PASSWORD: ${KAXI_DB_PASSWORD:-kaxi_db_fnos_8e7f4d2c9a6b}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kaxi_app -d kaxi_erp"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  redis:
+    image: docker.io/library/redis@sha256:ddd16a9b1575a774c7e62956be8daa1de5b32cfb5c25b7a216aefed8e0919f9b
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio:
+    image: docker.io/minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
+    restart: unless-stopped
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: ${KAXI_S3_ACCESS_KEY:-kaxi_minio}
+      MINIO_ROOT_PASSWORD: ${KAXI_S3_SECRET_KEY:-kaxi_s3_fnos_6b1f3e5d8c0a7b4f}
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  minio-init:
+    image: docker.io/minio/mc@sha256:aead63c77f9db9107f1696fb08ecb0faeda23729cde94b0f663edf4fe09728e3
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      KAXI_S3_ACCESS_KEY: ${KAXI_S3_ACCESS_KEY:-kaxi_minio}
+      KAXI_S3_SECRET_KEY: ${KAXI_S3_SECRET_KEY:-kaxi_s3_fnos_6b1f3e5d8c0a7b4f}
+      KAXI_S3_BUCKET: kaxi-documents
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["mc alias set local http://minio:9000 $$KAXI_S3_ACCESS_KEY $$KAXI_S3_SECRET_KEY && mc mb --ignore-existing local/$$KAXI_S3_BUCKET && mc anonymous set none local/$$KAXI_S3_BUCKET"]
+    restart: "no"
+
+  migrate:
+    image: docker.io/kaxitreasure/kaxierp:backend-latest
+    environment: *kaxi-environment
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        python backend/manage.py shell --settings=config.settings.production
+        -c "from django.db import connection; c=connection.cursor(); c.execute('CREATE SCHEMA IF NOT EXISTS erp AUTHORIZATION kaxi_app'); c.execute('CREATE SCHEMA IF NOT EXISTS staging AUTHORIZATION kaxi_app'); c.execute('CREATE SCHEMA IF NOT EXISTS ops AUTHORIZATION kaxi_app')" &&
+        python backend/manage.py migrate --noinput --settings=config.settings.production &&
+        python backend/manage.py seed_permissions --settings=config.settings.production &&
+        python backend/manage.py bootstrap_initial_admin --settings=config.settings.production
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  backend:
+    image: docker.io/kaxitreasure/kaxierp:backend-latest
+    restart: unless-stopped
+    environment: *kaxi-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/system/health/', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  worker:
+    image: docker.io/kaxitreasure/kaxierp:backend-latest
+    restart: unless-stopped
+    environment: *kaxi-environment
+    command: ["celery", "-A", "config", "worker", "--loglevel=INFO", "--concurrency=2", "-Q", "critical,integration,documents,finance,analytics,maintenance"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+
+  scheduler:
+    image: docker.io/kaxitreasure/kaxierp:backend-latest
+    restart: unless-stopped
+    environment: *kaxi-environment
+    command: ["celery", "-A", "config", "beat", "--loglevel=INFO", "--schedule=/tmp/celerybeat-schedule"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  web:
+    image: docker.io/kaxitreasure/kaxierp:frontend-latest
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${KAXI_HTTP_PORT:-8088}:8080"
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:

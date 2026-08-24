@@ -1,0 +1,1 @@
+"""KAXI ERP domain modules."""

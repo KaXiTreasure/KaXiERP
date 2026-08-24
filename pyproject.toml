@@ -1,0 +1,58 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kaxi-erp"
+version = "0.1.0"
+description = "KAXI ERP modular monolith"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "Django==5.2.17",
+  "djangorestframework==3.18.0",
+  "drf-spectacular==0.30.0",
+  "psycopg[binary]==3.3.4",
+  "celery==5.6.3",
+  "redis==7.2.2",
+  "boto3==1.43.78",
+  "fonttools==4.63.0",
+  "openpyxl==3.1.5",
+  "gunicorn==23.0.0; platform_system != 'Windows'",
+  "whitenoise==6.11.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4,<9",
+  "pytest-django>=4.11,<5",
+  "pytest-cov>=6.2,<7",
+  "ruff>=0.12,<1",
+  "mypy>=1.17,<2",
+  "django-stubs>=5.2,<6",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend/src/kaxi"]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "config.settings.test"
+pythonpath = ["backend", "backend/src"]
+testpaths = ["backend/tests"]
+addopts = "-ra --strict-markers"
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+src = ["backend/src"]
+extend-exclude = ["**/migrations/*.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "DJ"]
+
+[tool.mypy]
+python_version = "3.13"
+plugins = ["mypy_django_plugin.main"]
+strict = true
+
+[tool.django-stubs]
+django_settings_module = "config.settings.test"

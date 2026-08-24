@@ -1,0 +1,17 @@
+identity
+workflow
+documents
+master_data
+products
+pricing
+sales
+aftersales
+inventory
+warehouse
+purchasing
+manufacturing
+prepack
+trade
+finance
+integrations
+analytics
